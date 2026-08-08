@@ -13,6 +13,30 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def init_and_fix_db():
+    """Перевірка та підтримка будь-якої структури таблиці."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='terms'")
+    if not cursor.fetchone():
+        cursor.execute("""
+            CREATE TABLE terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT DEFAULT 'Загальне',
+                term TEXT NOT NULL,
+                transcription TEXT,
+                transcription_ua TEXT,
+                translation TEXT NOT NULL,
+                context TEXT DEFAULT '',
+                example_en TEXT DEFAULT '',
+                example_ua TEXT DEFAULT ''
+            )
+        """)
+    conn.commit()
+    conn.close()
+
+init_and_fix_db()
+
 @st.cache_data(ttl=300)
 def fetch_categories():
     conn = get_db_connection()
@@ -54,35 +78,35 @@ def fetch_terms_paginated(category=None, search_query=None, page=1, limit=ITEMS_
     
     return [dict(r) for r in rows], total_count
 
-def clean_text_for_audio(text: str) -> str:
-    """Видаляє номери, версії (v123) та суфікси цифр перед генерацією голосу."""
-    # Видаляє конструкції типу v123, v 123, #123 та окремі цифри
+def clean_text(text: str) -> str:
+    """Видаляє цифри та номери версій з тексту."""
+    if not text:
+        return ""
     cleaned = re.sub(r'\bv?\d+\b', '', text, flags=re.IGNORECASE)
-    # Очищення від зайвих пробілів
+    cleaned = re.sub(r'^\d+[\.\)]\s*', '', cleaned)
     return re.sub(r'\s+', ' ', cleaned).strip()
 
 def generate_audio(text: str):
-    """Генерація MP3 для очищеного від цифр тексту."""
-    clean_text = clean_text_for_audio(text)
-    if not clean_text:
-        clean_text = "Empty text"
-    tts = gTTS(text=clean_text, lang='en')
+    clean_t = clean_text(text)
+    if not clean_t:
+        clean_t = "Empty"
+    tts = gTTS(text=clean_t, lang='en')
     fp = io.BytesIO()
     tts.write_to_fp(fp)
     fp.seek(0)
     return fp
 
 # -------------------------------------------------------------------
-# Конфігурація Streamlit
+# Streamlit UI
 # -------------------------------------------------------------------
 st.set_page_config(
-    page_title="IT English Vocabulary Trainer (5000+)",
+    page_title="IT English Vocabulary (5000+ Cards)",
     page_icon="💻",
     layout="wide"
 )
 
 st.title("💻 IT English Vocabulary Trainer")
-st.caption("Масштабний тренажер IT-лексикону (5000+ слів та фраз)")
+st.caption("База з 5000+ індивідуальних IT-карток")
 
 st.sidebar.header("📌 Навігація та Фільтри")
 
@@ -99,10 +123,10 @@ if "current_page" not in st.session_state:
     st.session_state.current_page = 1
 
 # -------------------------------------------------------------------
-# Режим 1: Словник / Списком
+# Режим 1: Словник / Списком (Посторінкова навігація)
 # -------------------------------------------------------------------
 if mode == "Словник / Списком":
-    st.subheader("📚 Список термінів")
+    st.subheader("📚 Список IT-карток")
     
     terms, total_terms = fetch_terms_paginated(
         category=selected_category, 
@@ -111,7 +135,7 @@ if mode == "Словник / Списком":
     )
     
     st.sidebar.markdown("---")
-    st.sidebar.info(f"Всього знайдено: **{total_terms}** термінів")
+    st.sidebar.info(f"Всього знайдено карток: **{total_terms}**")
     
     total_pages = max(1, (total_terms + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
     
@@ -130,42 +154,41 @@ if mode == "Словник / Списком":
     st.markdown("---")
 
     if not terms:
-        st.warning("Термінів не знайдено.")
+        st.warning("Карток не знайдено.")
     else:
         for item in terms:
             item_id = item.get('id')
-            with st.expander(f"🇬🇧 **{item['term']}** — {item['translation']} [{item['category']}]"):
-                # Номер запису виведено окремим рядком
-                st.caption(f"🔢 **Запис №:** `{item_id}`")
+            term_clean = clean_text(item['term'])
+            ex_en_clean = clean_text(item.get('example_en', ''))
+            
+            with st.expander(f"🇬🇧 **{term_clean}** — {item['translation']} [{item.get('category', 'General')}]"):
+                # Номер картки (ID) окремим рядком
+                st.caption(f"🔢 **Номер картки:** `{item_id}`")
                 
                 col1, col2 = st.columns([1, 2])
-                
                 with col1:
-                    st.write("🗣️ **Транскрипція:**")
                     if item.get('transcription'):
                         st.code(item['transcription'], language="text")
                     if item.get('transcription_ua'):
                         st.write(f"🇺🇦 **Вимова (UA):** `{item['transcription_ua']}`")
                         
-                    st.write(f"🏷️ **Категорія:** {item['category']}")
-                    
-                    if st.button("🔊 Озвучити термін", key=f"audio_term_{item_id}"):
-                        audio_fp = generate_audio(item['term'])
-                        st.audio(audio_fp, format="audio/mp3")
+                    if st.button("🔊 Озвучити термін", key=f"audio_t_{item_id}"):
+                        st.audio(generate_audio(term_clean), format="audio/mp3")
                 
                 with col2:
-                    st.write(f"📖 **Контекст (UA):** {item['context']}")
-                    st.markdown(f"💬 **Приклад (EN):** *{item['example_en']}*")
-                    
-                    # Кнопка для озвучення прикладу без номерів
-                    if st.button("🔊 Озвучити приклад (EN)", key=f"audio_ex_{item_id}"):
-                        audio_fp = generate_audio(item['example_en'])
-                        st.audio(audio_fp, format="audio/mp3")
+                    st.write(f"📖 **Контекст:** {item.get('context', '')}")
+                    if ex_en_clean:
+                        st.markdown(f"💬 **Приклад (EN):** *{ex_en_clean}*")
                         
-                    st.markdown(f"🇺🇦 **Переклад прикладу:** {item['example_ua']}")
+                        # Кнопка озвучення прикладу без номерів
+                        if st.button("🔊 Озвучити приклад (EN)", key=f"audio_ex_{item_id}"):
+                            st.audio(generate_audio(ex_en_clean), format="audio/mp3")
+                            
+                    if item.get('example_ua'):
+                        st.markdown(f"🇺🇦 **Переклад прикладу:** {item['example_ua']}")
 
 # -------------------------------------------------------------------
-# Режим 2: Flashcards
+# Режим 2: Flashcards (Окремі картки)
 # -------------------------------------------------------------------
 elif mode == "Картки (Flashcards)":
     st.subheader("🟨 Інтерактивні картки")
@@ -174,7 +197,7 @@ elif mode == "Картки (Flashcards)":
         category=selected_category, 
         search_query=search_term, 
         page=1, 
-        limit=100
+        limit=5000
     )
     
     if not terms:
@@ -185,6 +208,8 @@ elif mode == "Картки (Flashcards)":
 
         current = terms[st.session_state.card_index % len(terms)]
         item_id = current.get('id')
+        term_clean = clean_text(current['term'])
+        ex_en_clean = clean_text(current.get('example_en', ''))
 
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:
@@ -202,9 +227,9 @@ elif mode == "Картки (Flashcards)":
 
         st.markdown("---")
         
-        # Номер запису окремим рядком
-        st.caption(f"🔢 **Запис №:** `{item_id}`")
-        st.markdown(f"### 🇬🇧 {current['term']}")
+        # Номер картки окремим рядком
+        st.caption(f"🔢 **Номер картки (ID):** `{item_id}`")
+        st.markdown(f"### 🇬🇧 {term_clean}")
         
         if current.get('transcription'):
             st.code(current['transcription'], language="text")
@@ -212,21 +237,21 @@ elif mode == "Картки (Flashcards)":
             st.write(f"🇺🇦 **Вимова (UA):** `{current['transcription_ua']}`")
         
         if st.button("🔊 Озвучити термін", key=f"audio_card_{item_id}"):
-            audio_fp = generate_audio(current['term'])
-            st.audio(audio_fp, format="audio/mp3")
+            st.audio(generate_audio(term_clean), format="audio/mp3")
 
         show_answer = st.checkbox("Показати переклад та контекст", key=f"card_check_{item_id}")
         
         if show_answer:
             st.success(f"**Переклад:** {current['translation']}")
-            st.info(f"**Контекст:** {current['context']}")
-            st.markdown(f"**Приклад:** {current['example_en']}")
+            st.info(f"**Контекст:** {current.get('context', '')}")
             
-            if st.button("🔊 Озвучити приклад (EN)", key=f"audio_card_ex_{item_id}"):
-                audio_fp = generate_audio(current['example_en'])
-                st.audio(audio_fp, format="audio/mp3")
+            if ex_en_clean:
+                st.markdown(f"**Приклад:** {ex_en_clean}")
+                if st.button("🔊 Озвучити приклад (EN)", key=f"audio_card_ex_{item_id}"):
+                    st.audio(generate_audio(ex_en_clean), format="audio/mp3")
                 
-            st.markdown(f"**Переклад прикладу:** {current['example_ua']}")
+            if current.get('example_ua'):
+                st.markdown(f"**Переклад прикладу:** {current['example_ua']}")
 
 # -------------------------------------------------------------------
 # Режим 3: Квіз / Тренажер
@@ -237,15 +262,14 @@ elif mode == "Тренажер / Квіз":
     terms, total_terms = fetch_terms_paginated(
         category=selected_category, 
         page=1, 
-        limit=50
+        limit=100
     )
     
     if len(terms) < 4:
-        st.warning("Потрібно принаймні 4 терміни у вибраній категорії.")
+        st.warning("Потрібно принаймні 4 терміни.")
     else:
         if "quiz_term" not in st.session_state or st.button("🔄 Наступне питання"):
             st.session_state.quiz_term = random.choice(terms)
-            
             correct = st.session_state.quiz_term['translation']
             others = [t['translation'] for t in terms if t['translation'] != correct]
             
@@ -254,9 +278,10 @@ elif mode == "Тренажер / Квіз":
             st.session_state.quiz_options = options
 
         q = st.session_state.quiz_term
+        term_clean = clean_text(q['term'])
         
-        st.caption(f"🔢 **Запис №:** `{q.get('id')}`")
-        st.markdown(f"### Як перекладається термін: **{q['term']}**?")
+        st.caption(f"🔢 **Номер картки (ID):** `{q.get('id')}`")
+        st.markdown(f"### Як перекладається термін: **{term_clean}**?")
         if q.get('transcription_ua'):
             st.caption(f"Вимова: `{q['transcription_ua']}`")
 
@@ -268,5 +293,3 @@ elif mode == "Тренажер / Квіз":
                 st.success("🎉 Правильно!")
             else:
                 st.error(f"❌ Невірно. Правильний переклад: **{q['translation']}**")
-            
-            st.info(f"**Контекст:** {q['context']}")
